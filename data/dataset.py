@@ -7,7 +7,7 @@ from data.image_processor import ImageProcessor
 
 
 class DiffusionDataset(Dataset):
-    def __init__(self, image_dir, captions_file, image_size=512):
+    def __init__(self, image_dir, captions_file, image_size=256):
         
         self.image_dir = image_dir
         self.image_processor = ImageProcessor(image_size)
@@ -16,7 +16,7 @@ class DiffusionDataset(Dataset):
         with open(captions_file, 'r') as f:
             self.captions = json.load(f)
             
-      
+
         self.samples = []
         print("Filtering dataset...")
         for item in self.captions:

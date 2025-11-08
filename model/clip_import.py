@@ -5,11 +5,14 @@ import torch.nn.functional as F
 
 
 class CLIPTextEncoder:
-    def __init__(self, model_name="openai/clip-vit-large-patch14", device='cuda'): 
+    def __init__(self, model_name="openai/clip-vit-large-patch14", device='cuda'):
+        
+        self.device = device 
         self.tokenizer = CLIPTokenizer.from_pretrained(model_name)
         self.text_encoder = CLIPTextModel.from_pretrained(model_name)
         self.text_encoder.to(device)
         self.text_encoder.eval()
+        
         
     def _encode(self, text_prompts, max_length=77):
         if isinstance(text_prompts, str):
@@ -25,7 +28,9 @@ class CLIPTextEncoder:
         
         with torch.no_grad():
             outputs = self.text_encoder(
+                
                 input_ids=tokens.input_ids.to(self.device),
+            
                 attention_mask=tokens.attention_mask.to(self.device)
             )
             

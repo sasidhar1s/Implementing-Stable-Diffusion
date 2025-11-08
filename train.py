@@ -1,13 +1,16 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import DataLoader
 import json
 from data.dataset import DiffusionDataset 
 import os
-from transformers import CLIPModel, CLIPProcessor
 from DiffusionModule import Diffusion
 from model.clip_import import CLIPImageEncoder, CLIPTextEncoder, CLIPLoss 
+import math
+from torch.cuda.amp import autocast, GradScaler
+
 
 
 def load_config(config_path):
@@ -15,14 +18,53 @@ def load_config(config_path):
         config = json.load(f)
     return config
 
+def get_cosine_schedule_with_warmup(optimizer, num_warmup_steps, num_training_steps):
+    def lr_lambda(current_step: int):
+        if current_step < num_warmup_steps:
+            return float(current_step) / float(max(1, num_warmup_steps))
+        progress = float(current_step - num_warmup_steps) / float(max(1, num_training_steps - num_warmup_steps))
+        return max(0.0, 0.5 * (1.0 + math.cos(math.pi * progress)))
+    return LambdaLR(optimizer, lr_lambda, last_epoch=-1)
 
+class ExponentialMovingAverage_EMA:
+    """Maintains moving average of model parameters for stable validation"""
+    def __init__(self, model, decay=0.9999):
+        self.decay = decay
+        self.shadow = {}
+        self.backup = {}
+        
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                self.shadow[name] = param.data.clone()
+
+    def update(self, model):
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                self.shadow[name].mul_(self.decay).add_(param.data, alpha=1 - self.decay)
+
+    def apply_shadow(self, model):
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                self.backup[name] = param.data.clone()
+                param.data.copy_(self.shadow[name])
+
+    def restore(self, model):
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                param.data.copy_(self.backup[name])
+                
+                
+                
+                
+                
 def train_model(config):
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+    os.makedirs(config['checkpoint_dir'], exist_ok=True)
     
-    dataset = DiffusionDataset(image_dir=config['image_dir'], text_file=config['text_file'])  
-    dataloader = DataLoader(dataset, batch_size=config['batch_size'], shuffle=True, num_workers=4)
+    dataset = DiffusionDataset(image_dir=config['image_dir'], captions_file=config['captions_file'], image_size=config['image_size'])  
+    dataloader = DataLoader(dataset, batch_size=config['batch_size'], shuffle=True, num_workers=4, pin_memory=True)
 
     
     
@@ -31,17 +73,36 @@ def train_model(config):
         beta_start=config['beta_start'],
         beta_end=config['beta_end'] ).to(device)
     
-
-    text_encoder = CLIPTextEncoder().to(device)
-    image_encoder = CLIPImageEncoder().to(device)
-    clip_loss_fn = CLIPLoss().to(device)
+    model_name = config['image&text_encoding_model'] # clip 
     
+    text_encoder = CLIPTextEncoder(model_name=model_name, device=device)
+    image_encoder = CLIPImageEncoder(model_name=model_name, device=device)
+    clip_loss = CLIPLoss(model_name=model_name, device=device)
+    
+    
+    clip_loss_fn= clip_loss.to(device)
+
+    optimizer = optim.AdamW(model.parameters(), lr=config['learning_rate'] ,
+                            weight_decay=config.get('weight_decay', 1e-2),
+                            betas=(0.9, 0.999))
 
 
-    optimizer = optim.Adam(model.parameters(), lr=config['learning_rate'])
+    total_iterations = config['total_iterations']
+    warmup_iterations = config.get('warmup_iterations', 0.1 * total_iterations)
+    scheduler=get_cosine_schedule_with_warmup(optimizer, num_warmup_steps=warmup_iterations,
+                                            num_training_steps=total_iterations)
+    
+    
+    scaler = GradScaler(enabled=config.get('mixed_precision', True))
+
+    
+    max_grad_norm = config.get('max_grad_norm', 1.0)
 
 
-    for epoch in range(config['epochs']):
+    ema = ExponentialMovingAverage_EMA(model, decay=config.get('ema_decay', 0.9999))
+
+    iteration = 0
+    while iteration < total_iterations:
         model.train()
         total_loss = 0
 
