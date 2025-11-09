@@ -7,7 +7,6 @@ class StableDiffusionVAE:
     def __init__(self, model_name="stabilityai/stable-diffusion-2-1", device='cuda'):
        
         self.device = device
-        
         self.vae = AutoencoderKL.from_pretrained(model_name, subfolder="vae")
         self.vae.to(device)
         self.vae.eval() 
