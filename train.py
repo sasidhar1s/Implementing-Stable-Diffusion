@@ -4,7 +4,7 @@ import torch.optim as optim
 from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import DataLoader
 import json
-from data.dataset import DiffusionDataset 
+from data.dataset import DiffusionDataset , ValidationDataset
 import os
 from DiffusionModule import Diffusion
 from model.clip_import import  CLIPTextEncoder
@@ -12,6 +12,8 @@ import math
 from torch.cuda.amp import autocast, GradScaler
 from model.VAE_import import StableDiffusionVAE as VAE
 from model.Unet import DenoisingModel 
+from PIL import Image
+
 
 def load_config(config_path):
     with open(config_path, 'r') as f:
@@ -70,12 +72,13 @@ def train_model(config):
     dataloader = DataLoader(dataset, batch_size=config['batch_size'], 
                             shuffle=True, num_workers=8, pin_memory=True)
 
-    
+    sampling_dataset = ValidationDataset(prompts_file=config['validation_prompts_file'])
+    sampling_dataloader = DataLoader(sampling_dataset, batch_size= config['sampling_batch_size'], shuffle=False)
     
     Diffusion_model = Diffusion(
-        timesteps=config['timesteps'],
+        timesteps=config['timesteps'],device=device,
         beta_start=config['beta_start'],
-        beta_end=config['beta_end'] ).to(device)
+        beta_end=config['beta_end'] )
     
     
     Denoising_model = DenoisingModel(in_channels= config['latent_channels'],
@@ -118,7 +121,8 @@ def train_model(config):
     epoch = 0
     
     while iteration < total_iterations:
-        DenoisingModel.train()
+        
+        Denoising_model.train()
         
 
         for batch in (dataloader):
@@ -134,7 +138,7 @@ def train_model(config):
                 
                 z_0 = VAE_model.encode(images) 
                 
-                text_embeddings = text_encoder.encode_pooled(captions)
+                text_embeddings = text_encoder.encode_last_hidden_state(captions)
             
 
             
@@ -189,13 +193,73 @@ def train_model(config):
     print("Training Done !!!!!")
 
 
-def sample_images(model, config , device):
-    num_samples = config['num_samples']
-    model.eval()
+
+
+def generate_validation_samples(diffusion_model, denoising_model, text_encoder, vae_model, 
+                            validation_prompts, config, device, iteration):
+    
+    denoising_model.eval()
+    
+    os.makedirs(os.path.join(config['checkpoint_dir'], 'samples'), exist_ok=True)  # Fixed: was Validation_dir
+    
     with torch.no_grad():
-        sampled_images = model.sample((num_samples, 3, 256, 256), device=device) 
-    return sampled_images
+        
+        cfg_scale = config.get('cfg_scale', 1.0)
+        
 
+        cond_embeddings = text_encoder.encode_last_hidden_state(validation_prompts)  # [N, 77, 768]
+        uncond_embeddings = text_encoder.get_unconditional_embeddings(len(validation_prompts))  # [N, 77, 768]
+        
 
+        sampled_latents = sample_with_cfg(
+            diffusion_model, denoising_model, 
+            cond_embeddings, uncond_embeddings, 
+            cfg_scale, config, device
+        )
+        
+        
+        sampled_latents = sampled_latents / 0.18215  # normalizing VAE latents by dividing with varaince
+        sampled_images = vae_model.decode(sampled_latents)  # [N, 3, H, W]
+        
+        
+        for prompt_idx, (img, prompt) in enumerate(zip(sampled_images, validation_prompts)):
+            
+            img = (img + 1) / 2
+            img = torch.clamp(img, 0, 1)
+            
+            
+            pil_img = Image.fromarray((img.cpu().numpy() * 255).astype('uint8'))
+            safe_prompt = "".join(c for c in prompt if c.isalnum() or c in (' ', '-', '_')).rstrip()
+            pil_img.save(os.path.join(config['checkpoint_dir'], 'samples', 
+                                    f"sample_iter_{iteration}_cfg_{cfg_scale}_prompt_{prompt_idx}_{safe_prompt[:50]}.png"))
     
+    print(f"Validation samples saved for iteration {iteration}")
+
+def sample_with_cfg(diffusion_model, denoising_model, cond_context, uncond_context, 
+                cfg_scale, config, device):
+
+    num_samples = cond_context.shape[0]
+    latent_shape = (num_samples, config['latent_channels'], config['latent_size'], config['latent_size'])
     
+    latents = torch.randn(latent_shape, device=device)
+    
+    for i in reversed(range(diffusion_model.timesteps)):
+        t = torch.full((num_samples,), i, device=device, dtype=torch.long)
+        
+        latents_batch = latents.repeat(2, 1, 1, 1)
+        t_batch = t.repeat(2)
+        context_batch = torch.cat([uncond_context, cond_context], dim=0)
+        
+        noise_pred = denoising_model(latents_batch, t_batch, context_batch)
+        noise_pred_uncond, noise_pred_cond = noise_pred.chunk(2)
+        
+        if cfg_scale == 1.0:
+            noise_pred_cfg = noise_pred_cond  # No CFG effect
+        else:
+            noise_pred_cfg = noise_pred_uncond + cfg_scale * (noise_pred_cond - noise_pred_uncond)
+        
+        
+        latents = diffusion_model.p_xtminus1_given_xt(latents, t, denoising_model, context=None)
+    
+    return latents
+# update the sampling function to include cfg

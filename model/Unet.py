@@ -251,7 +251,7 @@ class DenoisingModel(nn.Module):
         
         # x - [B, 4, H, W] 
         # timesteps - [B] 
-        # context - [B, T, 768] 
+        # context - [B, 77, 768] 
         
         return self.unet(x, timesteps, context)
 

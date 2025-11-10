@@ -48,3 +48,30 @@ class DiffusionDataset(Dataset):
             'image': image,
             'caption': caption  
         }
+        
+        
+class ValidationDataset(Dataset):
+    def __init__(self, prompts_file=None, max_prompts=None):
+        
+        
+        with open(prompts_file, 'r') as f:
+            data = json.load(f)
+            if isinstance(data, list):
+                prompts = data  # ["prompt1", "prompt2", ...]
+            elif isinstance(data, dict) and 'prompts' in data:
+                prompts = data['prompts']  # {"prompts": ["prompt1", ...]}
+            else:
+                prompts = [item['prompt'] for item in data]  # [{"prompt": "..."}, ...]
+        
+        
+        
+        if max_prompts is not None:
+            prompts = prompts[:max_prompts]
+        
+        self.prompts = prompts
+    
+    def __len__(self):
+        return len(self.prompts)
+    
+    def __getitem__(self, idx):
+        return self.prompts[idx]
