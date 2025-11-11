@@ -20,7 +20,7 @@ class Diffusion:
     @staticmethod
     def pick_t_index_expand_to_shape(a, t, target_shape):
         batch_size = t.shape[0]
-        out = a.to(t.device).gather(-1, t)
+        out = a.gather(-1, t)
         return out.reshape(batch_size, *((1,) * (len(target_shape) - 1)))
 
     def q_xt_given_x0(self, x_0, t, noise=None):
@@ -59,7 +59,33 @@ class Diffusion:
             
             return posterior_mean + torch.sqrt(posterior_variance_t.to(x_t.dtype)) * noise
 
+    """   for cfg   """
+    @torch.no_grad()
+    def px_t_minus1_given_predicted_noise_and_x_t(self, predicted_noise, x_t, t , clip_denoised=True, repeat_noise=False):
+        posterior_variance_t = self.pick_t_index_expand_to_shape(self.posterior_variance, t, x_t.shape)
+        posterior_mean_coef1_t = self.pick_t_index_expand_to_shape(self.posterior_mean_coef1, t, x_t.shape)
+        posterior_mean_coef2_t = self.pick_t_index_expand_to_shape(self.posterior_mean_coef2, t, x_t.shape)
+        sqrt_one_minus_alpha_cumprod_t = self.pick_t_index_expand_to_shape(self.sqrt_one_minus_alpha_cumprod, t, x_t.shape)
 
+        sqrt_recip_alpha_cumprod = 1.0 / self.sqrt_alpha_cumprod
+        sqrt_recip_alpha_cumprod_t = self.pick_t_index_expand_to_shape(sqrt_recip_alpha_cumprod, t, x_t.shape)
+
+        
+        x_0_predicted = sqrt_recip_alpha_cumprod_t * (x_t - sqrt_one_minus_alpha_cumprod_t * predicted_noise)
+        
+        if clip_denoised:
+            x_0_predicted.clamp_(-1., 1.)
+
+        posterior_mean = posterior_mean_coef1_t * x_0_predicted + posterior_mean_coef2_t * x_t
+
+        if t[0] == 0:
+            return posterior_mean
+        else:
+            noise = torch.randn_like(x_t, dtype=x_t.dtype) if not repeat_noise else torch.randn(
+                                                (1, *x_t.shape[1:]), dtype=x_t.dtype, device=x_t.device)
+            
+            return posterior_mean + torch.sqrt(posterior_variance_t.to(x_t.dtype)) * noise
+        
 
     @torch.no_grad()
     def sample(self, shape, model, device, context=None, repeat_noise=False, x_start=None):

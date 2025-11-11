@@ -15,7 +15,7 @@ class StableDiffusionVAE:
     def encode(self, images: torch.Tensor) -> torch.Tensor:
         
         
-        images = images.to(self.device)
+        #images = images.to(self.device)
         
         with torch.no_grad():
             
@@ -32,7 +32,7 @@ class StableDiffusionVAE:
     def decode(self, latents: torch.Tensor) -> torch.Tensor:
       
       
-        latents = latents.to(self.device)
+        #latents = latents.to(self.device)
         
         
         latents = latents / self.scaling_factor

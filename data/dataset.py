@@ -49,7 +49,7 @@ class DiffusionDataset(Dataset):
             'caption': caption  
         }
         
-        
+'''        
 class ValidationDataset(Dataset):
     def __init__(self, prompts_file=None, max_prompts=None):
         
@@ -75,3 +75,7 @@ class ValidationDataset(Dataset):
     
     def __getitem__(self, idx):
         return self.prompts[idx]
+        
+        
+        
+        '''

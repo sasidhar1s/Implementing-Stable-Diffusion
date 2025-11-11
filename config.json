@@ -1,0 +1,43 @@
+{
+"paths": {
+    "image_dir": "",
+    "captions_file": "captions.json",
+    "validation_prompts_file": ".json",
+    "resume_checkpoint": null
+},
+
+"training_parameters": {
+    "total_iterations": 300000,
+    "batch_size_per_gpu": 16,  
+    "learning_rate": 1e-4,
+    "weight_decay": 0.01,
+    "warmup_iterations": 10000,
+    "max_grad_norm": 1.0,
+    "mixed_precision": true,
+    "caption_dropout_prob": 0.1
+},
+
+"model_parameters": {
+    "image_size": 512,
+    "latent_channels": 4,
+    "context_dim": 768,
+    "vae_model": "stabilityai/sd-vae-ft-mse",
+    "image&text_encoding_model": "openai/clip-vit-large-patch14",
+    "ema_decay": 0.9999
+},
+
+"diffusion_schedule": {
+    "timesteps": 1000,
+    "beta_start": 0.00085,
+    "beta_end": 0.012
+},
+
+"sampling_parameters": {
+    "print_frequency": 100,
+    "save_frequency": 5000,
+    "sample_frequency": 2000,
+    "cfg_scale": 7.5,
+    "clip_denoised":true,
+    "repeat_noise": false
+}
+}
