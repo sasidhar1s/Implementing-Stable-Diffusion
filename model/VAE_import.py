@@ -3,11 +3,12 @@ from diffusers import AutoencoderKL
 from PIL import Image
 import torchvision.transforms as T
 
+
 class StableDiffusionVAE:
-    def __init__(self, model_name="stabilityai/stable-diffusion-2-1", device='cuda'):
-       
+    def __init__(self, model_name, device='cuda'):
+
         self.device = device
-        self.vae = AutoencoderKL.from_pretrained(model_name, subfolder="vae")
+        self.vae = AutoencoderKL.from_pretrained(model_name)
         self.vae.to(device)
         self.vae.eval() 
         self.scaling_factor = self.vae.config.scaling_factor
@@ -30,8 +31,7 @@ class StableDiffusionVAE:
         return latents
 
     def decode(self, latents: torch.Tensor) -> torch.Tensor:
-      
-      
+
         #latents = latents.to(self.device)
         
         

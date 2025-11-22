@@ -1,1 +1,1 @@
-torchrun --nproc_per_node=4 train.py --config="config.json" --gpu_ids="0,1,2,3"
+OMP_NUM_THREADS=16 torchrun --nproc_per_node=2 train.py --config="config.json" --gpu_ids="0,1"

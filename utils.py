@@ -9,13 +9,16 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.optim.lr_scheduler import LambdaLR
 
 
-def load_checkpoint(checkpoint_path, model, optimizer, scheduler, ema, scaler, device, is_main_process):
-    
+import os
+import logging
+import torch
+from torch.nn.parallel import DistributedDataParallel as DDP
 
+def load_checkpoint(checkpoint_path, model, optimizer, scheduler, ema, scaler, device, is_main_process):
+   
     if not checkpoint_path:
         return 0, 0
-
-
+    
     if not os.path.exists(checkpoint_path):
         if is_main_process:
             logging.warning(f"Checkpoint path {checkpoint_path} not found. Starting training from scratch.")
@@ -25,31 +28,69 @@ def load_checkpoint(checkpoint_path, model, optimizer, scheduler, ema, scaler, d
         if is_main_process:
             logging.info(f"Resuming training from checkpoint: {checkpoint_path}")
         
-        
-        checkpoint = torch.load(checkpoint_path, map_location=device)
+        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
         
         
         state_dict = checkpoint['model_state_dict']
-        filtered_state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}
-        model.load_state_dict(filtered_state_dict)
-
-        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-        ema.load_state_dict(checkpoint['ema_state_dict'])
-        scaler.load_state_dict(checkpoint['scaler_state_dict'])
         
 
-        start_iteration = checkpoint['iteration'] + 1
-        start_epoch = checkpoint.get('epoch', 0) 
+        is_ddp = isinstance(model, DDP)
+        
+        
+        has_module_prefix = any(k.startswith('module.') for k in state_dict.keys())
+        
+       
+        if is_ddp and not has_module_prefix:
+        
+            state_dict = {f'module.{k}': v for k, v in state_dict.items()}
+        elif not is_ddp and has_module_prefix:
+      
+            state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}
+        
+      
+        model.load_state_dict(state_dict)
+        
+        
+        if 'optimizer_state_dict' in checkpoint:
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        else:
+            if is_main_process:
+                logging.warning("Optimizer state not found in checkpoint")
+        
 
+        if 'scheduler_state_dict' in checkpoint:
+            scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+        else:
+            if is_main_process:
+                logging.warning("Scheduler state not found in checkpoint")
+        
+
+        if 'ema_state_dict' in checkpoint:
+            ema.load_state_dict(checkpoint['ema_state_dict'])
+        else:
+            if is_main_process:
+                logging.warning("EMA state not found in checkpoint")
+        
+
+        if 'scaler_state_dict' in checkpoint:
+            scaler.load_state_dict(checkpoint['scaler_state_dict'])
+        else:
+            if is_main_process:
+                logging.warning("Scaler state not found in checkpoint")
+        
+
+        start_iteration = checkpoint.get('iteration', 0) + 1
+        start_epoch = checkpoint.get('epoch', 0)
+        
         if is_main_process:
-            logging.info(f"Resumed successfully from iteration {start_iteration - 1}.")
-            
+            logging.info(f"Resumed successfully from iteration {start_iteration - 1}, epoch {start_epoch}")
+        
         return start_iteration, start_epoch
-
+        
     except Exception as e:
         if is_main_process:
             logging.error(f"Error loading checkpoint {checkpoint_path}: {e}")
+            logging.exception("Full traceback:")
             logging.error("Could not load checkpoint. Starting training from scratch.")
         return 0, 0
     

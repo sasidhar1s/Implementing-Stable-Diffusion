@@ -5,17 +5,14 @@ import torch.nn.functional as F
 
 
 def get_timestep_embedding(timesteps, embedding_dim):
-    
     half_dim = embedding_dim // 2
-    emb = torch.exp(
-        -torch.log(torch.tensor(10000.0)) * 
-        torch.arange(half_dim, dtype=torch.float32) / (half_dim - 1)
-    ).to(timesteps.device)
+    emb = torch.log(torch.tensor(10000.0)) / (half_dim - 1) 
+    emb = torch.exp(-emb * torch.arange(half_dim, device=timesteps.device))
     emb = timesteps.float().unsqueeze(1) * emb.unsqueeze(0)
     emb = torch.cat([torch.sin(emb), torch.cos(emb)], dim=1)
+    if embedding_dim % 2 == 1: # zero pad
+        emb = F.pad(emb, (0, 1))
     return emb
-
-
 
 class TimestepEmbedding(nn.Module):
     def __init__(self, input_dim, output_dim):
@@ -25,17 +22,17 @@ class TimestepEmbedding(nn.Module):
 
     def forward(self, x):
         x = F.silu(self.linear1(x))
-        x = F.silu(self.linear2(x))
+        x = self.linear2(x) 
         return x
 
 class ResidualBlock(nn.Module):
     def __init__(self, in_channels, out_channels, time_dim):
         super().__init__()
-        self.norm1 = nn.GroupNorm(32, in_channels)
+        self.norm1 = nn.GroupNorm(32, in_channels, eps=1e-6)
         self.conv1 = nn.Conv2d(in_channels, out_channels, 3, padding=1)
         
         self.time_proj = nn.Linear(time_dim, out_channels)
-        self.norm2 = nn.GroupNorm(32, out_channels)
+        self.norm2 = nn.GroupNorm(32, out_channels, eps=1e-6)
         self.conv2 = nn.Conv2d(out_channels, out_channels, 3, padding=1)
         
         self.skip = nn.Conv2d(in_channels, out_channels, 1) if in_channels != out_channels else nn.Identity()
@@ -44,7 +41,6 @@ class ResidualBlock(nn.Module):
         h = F.silu(self.norm1(x))
         h = self.conv1(h)
         
-        # time conditioning
         time_mod = self.time_proj(F.silu(time_emb)).unsqueeze(-1).unsqueeze(-1)
         h = h + time_mod
         
@@ -54,49 +50,67 @@ class ResidualBlock(nn.Module):
         return h + self.skip(x)
 
 class AttentionBlock(nn.Module):
-    def __init__(self, channels, context_dim):
+    def __init__(self, channels, context_dim=None, num_heads=8):
         super().__init__()
-        self.norm = nn.GroupNorm(32, channels)
+        self.num_heads = num_heads
+        self.head_dim = channels // num_heads
         
-        # Self attention
-        self.qkv = nn.Conv2d(channels, channels * 3, 1)
-        self.proj = nn.Conv2d(channels, channels, 1)
         
-        # Cross attention -  text conditioning
-        self.text_norm = nn.LayerNorm(channels)
-        self.text_proj = nn.Linear(context_dim, channels)
-        self.text_q = nn.Linear(channels, channels)
-        self.text_k = nn.Linear(context_dim, channels)
-        self.text_v = nn.Linear(context_dim, channels)
-        self.text_out = nn.Linear(channels, channels)
+        self.norm = nn.GroupNorm(32, channels, eps=1e-6)
+        self.to_qkv = nn.Linear(channels, channels * 3)  
+        self.to_out_self = nn.Linear(channels, channels)
+        
+        
+        self.use_cross_attn = context_dim is not None
+        if self.use_cross_attn:
+            self.norm_cross = nn.GroupNorm(32, channels, eps=1e-6) 
+            self.to_q_cross = nn.Linear(channels, channels)  
+            self.to_kv_cross = nn.Linear(context_dim, channels * 2)  
+            self.to_out_cross = nn.Linear(channels, channels)
 
-    def forward(self, x, context):
+    def forward(self, x, context=None):
         B, C, H, W = x.shape
-        h = self.norm(x)
+        x_in = x
         
-        # Self attention
-        qkv = self.qkv(h).reshape(B, C * 3, H * W).transpose(1, 2)
-        q, k, v = qkv.chunk(3, dim=-1)
         
-        attn = torch.softmax(torch.bmm(q, k.transpose(-1, -2)) / (C ** 0.5), dim=-1)
-        self_out = torch.bmm(attn, v).transpose(1, 2).reshape(B, C, H, W)
-        h = x + self.proj(self_out)
+        x_norm = self.norm(x)
+        x_norm = x_norm.view(B, C, H * W).transpose(1, 2)
         
-        # Cross-attention ( for text context )
-        if context is not None:
-            text_features = self.text_norm(h.reshape(B, C, H * W).transpose(1, 2))  
-            text_k = self.text_k(context)  
-            text_v = self.text_v(context) 
+        qkv = self.to_qkv(x_norm).chunk(3, dim=-1)
+        q, k, v = map(
+            lambda t: t.view(B, -1, self.num_heads, self.head_dim).transpose(1, 2), 
+            qkv
+        )
+        
+        attn = F.scaled_dot_product_attention(q, k, v)
+        attn = attn.transpose(1, 2).contiguous().view(B, H * W, C)
+        attn = self.to_out_self(attn)
+        attn = attn.transpose(1, 2).view(B, C, H, W)
+        
+        x = x_in + attn  
+        
+        
+        if self.use_cross_attn and context is not None:
+            x_norm = self.norm_cross(x)
+            x_norm = x_norm.view(B, C, H * W).transpose(1, 2)
             
-            text_q_out = self.text_q(text_features)  
-            text_attn = torch.softmax(
-                torch.bmm(text_q_out, text_k.transpose(-1, -2)) / (C ** 0.5), 
-                dim=-1
+            q = self.to_q_cross(x_norm)
+            kv = self.to_kv_cross(context)
+            k, v = kv.chunk(2, dim=-1)
+            
+            q, k, v = map(
+                lambda t: t.view(B, -1, self.num_heads, self.head_dim).transpose(1, 2),
+                (q, k, v)
             )
-            text_out = torch.bmm(text_attn, text_v).transpose(1, 2).reshape(B, C, H, W)
-            h = h + self.text_out(text_out.transpose(1, 2).reshape(B, C, H, W))
+            
+            attn = F.scaled_dot_product_attention(q, k, v)
+            attn = attn.transpose(1, 2).contiguous().view(B, H * W, C)
+            attn = self.to_out_cross(attn)
+            attn = attn.transpose(1, 2).view(B, C, H, W)
+            
+            x = x + attn  
         
-        return h
+        return x
 
 class UpsampleBlock(nn.Module):
     def __init__(self, channels):
@@ -117,141 +131,136 @@ class DownsampleBlock(nn.Module):
 
 
 
+
+class UNetEncoderLevel(nn.Module):
+    def __init__(self, modules):
+        super().__init__()
+        
+        self.layers = nn.ModuleList(modules)
+
+    def forward(self, x, t_emb, context):
+        
+        for layer in self.layers:
+            if isinstance(layer, ResidualBlock):
+                x = layer(x, t_emb)
+            elif isinstance(layer, AttentionBlock):
+                x = layer(x, context)
+            else:
+                x = layer(x)
+        return x
+
+class UNetDecoderLevel(nn.Module):
+    def __init__(self, modules):
+        super().__init__()
+        
+        self.layers = nn.ModuleList(modules)
+
+    def forward(self, x, t_emb, context):
+        
+        for layer in self.layers:
+            if isinstance(layer, ResidualBlock):
+                x = layer(x, t_emb)
+            elif isinstance(layer, AttentionBlock):
+                x = layer(x, context)
+            else:
+                x = layer(x)
+        return x
+
 class UNet(nn.Module):
     def __init__(self, in_channels=4, context_dim=768):
         super().__init__()
         
-        # Time embedding
-        self.time_mlp = TimestepEmbedding(320, 1280)
-        
+        self.time_mlp = nn.Sequential(
+            nn.Linear(320, 1280),
+            nn.SiLU(),
+            nn.Linear(1280, 1280)
+        )
         
         self.input_proj = nn.Conv2d(in_channels, 320, 3, padding=1)
         
-        
         self.encoder_layers = nn.ModuleList([
-            #  320 channels
-            nn.Sequential(
-                ResidualBlock(320, 320, 1280),
-                AttentionBlock(320, context_dim),
-                ResidualBlock(320, 320, 1280),
-                AttentionBlock(320, context_dim)
-            ),
+            UNetEncoderLevel([ResidualBlock(320, 320, 1280), 
+                            AttentionBlock(320, context_dim), 
+                            ResidualBlock(320, 320, 1280), 
+                            AttentionBlock(320, context_dim)]),
             
-            #  320 -> 640
-            nn.Sequential(
-                DownsampleBlock(320),
-                ResidualBlock(320, 640, 1280),
-                AttentionBlock(640, context_dim),
-                ResidualBlock(640, 640, 1280),
-                AttentionBlock(640, context_dim)
-            ),
+            UNetEncoderLevel([DownsampleBlock(320),
+                            ResidualBlock(320, 640, 1280), 
+                            AttentionBlock(640, context_dim),
+                            ResidualBlock(640, 640, 1280),
+                            AttentionBlock(640, context_dim)]),
             
-            #  640 -> 1280
-            nn.Sequential(
-                DownsampleBlock(640),
-                ResidualBlock(640, 1280, 1280),
-                AttentionBlock(1280, context_dim),
-                ResidualBlock(1280, 1280, 1280),
-                AttentionBlock(1280, context_dim)
-            ),
+            UNetEncoderLevel([DownsampleBlock(640),
+                            ResidualBlock(640, 1280, 1280),
+                            AttentionBlock(1280, context_dim), 
+                            ResidualBlock(1280, 1280, 1280), 
+                            AttentionBlock(1280, context_dim)]),
             
-            #  1280 -> 1280
-            nn.Sequential(
-                DownsampleBlock(1280),
-                ResidualBlock(1280, 1280, 1280),
-                ResidualBlock(1280, 1280, 1280)
-            )
+            UNetEncoderLevel([DownsampleBlock(1280),
+                            ResidualBlock(1280, 1280, 1280),
+                            ResidualBlock(1280, 1280, 1280)])
         ])
         
-        
-        self.bottleneck = nn.Sequential(
+        self.bottleneck = UNetEncoderLevel([
             ResidualBlock(1280, 1280, 1280),
             AttentionBlock(1280, context_dim),
             ResidualBlock(1280, 1280, 1280)
-        )
-        
-        # Decoder 
-        self.decoder_layers = nn.ModuleList([
-            # 1280 -> 1280
-            nn.Sequential(
-                ResidualBlock(2560, 1280, 1280),  # 1280 + 1280 from skip
-                ResidualBlock(2560, 1280, 1280),
-                UpsampleBlock(1280)
-            ),
-            
-            # 2560 -> 1280 -> 640
-            nn.Sequential(
-                ResidualBlock(2560, 1280, 1280),
-                AttentionBlock(1280, context_dim),
-                ResidualBlock(2560, 1280, 1280),
-                AttentionBlock(1280, context_dim),
-                UpsampleBlock(1280)
-            ),
-            
-            #  1920 -> 640 -> 320
-            nn.Sequential(
-                ResidualBlock(1920, 640, 1280),
-                AttentionBlock(640, context_dim),
-                ResidualBlock(1280, 640, 1280),
-                AttentionBlock(640, context_dim),
-                UpsampleBlock(640)
-            ),
-            
-            #  960 -> 320 -> 320
-            nn.Sequential(
-                ResidualBlock(960, 320, 1280),
-                AttentionBlock(320, context_dim),
-                ResidualBlock(640, 320, 1280),
-                AttentionBlock(320, context_dim),
-                ResidualBlock(640, 320, 1280)
-            )
         ])
         
+        self.decoder_layers = nn.ModuleList([
+            UNetDecoderLevel([ResidualBlock(2560, 1280, 1280),
+                            ResidualBlock(1280, 1280, 1280),
+                            UpsampleBlock(1280)]),
+            UNetDecoderLevel([ResidualBlock(2560, 1280, 1280),
+                            AttentionBlock(1280, context_dim), 
+                            ResidualBlock(1280, 1280, 1280), 
+                            AttentionBlock(1280, context_dim), 
+                            UpsampleBlock(1280)]),
+            UNetDecoderLevel([ResidualBlock(1920, 640, 1280),
+                            AttentionBlock(640, context_dim), 
+                            ResidualBlock(640, 640, 1280), 
+                            AttentionBlock(640, context_dim), 
+                            UpsampleBlock(640)]),
+            UNetDecoderLevel([ResidualBlock(960, 320, 1280), 
+                            AttentionBlock(320, context_dim),
+                            ResidualBlock(320, 320, 1280), 
+                            AttentionBlock(320, context_dim),
+                            ResidualBlock(320, 320, 1280)])
+        ])
         
-        self.output_norm = nn.GroupNorm(32, 320)
+        self.output_norm = nn.GroupNorm(32, 320, eps=1e-6)
         self.output_conv = nn.Conv2d(320, in_channels, 3, padding=1)
 
     def forward(self, x, timesteps, context):
         
+
+        
         t_emb = get_timestep_embedding(timesteps, 320)
         t_emb = self.time_mlp(t_emb)
         
-        
         x = self.input_proj(x)
         
-        
         skips = []
-        
-
         for level in self.encoder_layers:
-            x = level(x) if isinstance(level, nn.Sequential) else level(x)
+            x = level(x, t_emb, context)
             skips.append(x)
         
+        x = self.bottleneck(x, t_emb, context)
         
-        x = self.bottleneck(x)
-        
-        
-        for i, level in enumerate(self.decoder_layers):
+        for level in self.decoder_layers:
             skip = skips.pop()  
             x = torch.cat([x, skip], dim=1)  
-            x = level(x)
+            x = level(x, t_emb, context)
         
         x = F.silu(self.output_norm(x))
         x = self.output_conv(x)
         
         return x
-
-
+        
 class DenoisingModel(nn.Module):
     def __init__(self, in_channels=4, context_dim=768):
         super().__init__()
         self.unet = UNet(in_channels, context_dim)
 
     def forward(self, x, timesteps, context):
-        
-        # x - [B, 4, H, W] 
-        # timesteps - [B] 
-        # context - [B, 77, 768] 
-        
         return self.unet(x, timesteps, context)
-

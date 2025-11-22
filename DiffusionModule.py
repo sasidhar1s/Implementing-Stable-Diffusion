@@ -13,7 +13,7 @@ class Diffusion:
             self.alpha_cumprod[:-1]))
         self.sqrt_alpha_cumprod = torch.sqrt(self.alpha_cumprod)
         self.sqrt_one_minus_alpha_cumprod = torch.sqrt(1.0 - self.alpha_cumprod)
-        self.posterior_variance = self.betas * (1. - self.alpha_cumprod_prev) / (1. - self.alpha_cumprod)
+        self.posterior_variance = torch.clamp(self.betas * (1. - self.alpha_cumprod_prev) / (1. - self.alpha_cumprod).clamp(min=1e-8),min=1e-20)
         self.posterior_mean_coef1 = self.betas * torch.sqrt(self.alpha_cumprod_prev) / (1. - self.alpha_cumprod)
         self.posterior_mean_coef2 = (1. - self.alpha_cumprod_prev) * torch.sqrt(self.alphas) / (1. - self.alpha_cumprod)
 

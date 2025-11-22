@@ -3,79 +3,100 @@ from torch.utils.data import Dataset
 import json
 import os
 import random
-from data.image_processor import ImageProcessor
+from PIL import Image
+from torchvision import transforms as T
+from collections import defaultdict
+
+
+class Crop_and_Resize:
+    def __init__(self, image_size=256): 
+        self.image_size = image_size
+        
+        
+        self.transform = T.Compose([
+            T.RandomCrop(image_size),
+            T.ToTensor(),
+            T.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5], inplace=True)
+        ])
+
+    def crop_resize(self, image_path):
+        try:
+            image = Image.open(image_path).convert("RGB")
+        except Exception:
+            
+            return None
+            
+        
+        if min(image.size) < self.image_size:
+            
+            return None
+
+        return self.transform(image)
 
 
 class DiffusionDataset(Dataset):
     def __init__(self, image_dir, captions_file, image_size=256, caption_dropout_prob=0.1):
         self.image_dir = image_dir
-        self.image_processor = ImageProcessor(image_size)
-        self.caption_dropout_prob = caption_dropout_prob  
+        self.image_processor = Crop_and_Resize(image_size)
+        self.caption_dropout_prob = caption_dropout_prob
         
-        with open(captions_file, 'r') as f:
-            self.captions = json.load(f)
+        with open(captions_file, 'r', encoding='utf-8') as f:
+            captions_data = json.load(f)
             
         self.samples = []
     
-        for item in self.captions:
-            image_path = os.path.join(image_dir, item['image'])
+        
+
+        
+        for img_name, caption_list in captions_data.items():
+            
+            
+            image_path = os.path.join(image_dir, img_name)
+            
+    
             if os.path.exists(image_path):
+            
                 self.samples.append({
                     'image_path': image_path,
-                    'caption': item['caption']
+                    'captions': caption_list 
                 })
-        print(f"Found {len(self.samples)} total samples.")
+        
+        if not self.samples:
+            raise ValueError("No valid image files found")
+        
+        
     
     def __len__(self):
         return len(self.samples)
-    
+
     def __getitem__(self, idx):
-        sample = self.samples[idx]
+       
+        while True:
+         
+            current_idx = idx % len(self.samples)
+            sample = self.samples[current_idx]
+            
+            image = self.image_processor.crop_resize(sample['image_path'])
+            
+            if image is not None:
+    
+                break
+            
+            
+            idx = random.randint(0, len(self) - 1)
+
         
-        image = self.image_processor.preprocess_image(sample['image_path'])
         
-        while image is None:
-            new_idx = random.randint(0, len(self) - 1)
-            return self.__getitem__(new_idx)
+        caption_list = sample['captions']
+        selected_caption = random.choice(caption_list)
         
         
         if random.random() < self.caption_dropout_prob:
-            caption = ""  # (guidance free training)
+            final_caption = " "  
         else:
-            caption = sample['caption']  # conditional training
+            final_caption = selected_caption
 
         return {
             'image': image,
-            'caption': caption  
+            'caption': final_caption
         }
-        
-'''        
-class ValidationDataset(Dataset):
-    def __init__(self, prompts_file=None, max_prompts=None):
-        
-        
-        with open(prompts_file, 'r') as f:
-            data = json.load(f)
-            if isinstance(data, list):
-                prompts = data  # ["prompt1", "prompt2", ...]
-            elif isinstance(data, dict) and 'prompts' in data:
-                prompts = data['prompts']  # {"prompts": ["prompt1", ...]}
-            else:
-                prompts = [item['prompt'] for item in data]  # [{"prompt": "..."}, ...]
-        
-        
-        
-        if max_prompts is not None:
-            prompts = prompts[:max_prompts]
-        
-        self.prompts = prompts
-    
-    def __len__(self):
-        return len(self.prompts)
-    
-    def __getitem__(self, idx):
-        return self.prompts[idx]
-        
-        
-        
-        '''
